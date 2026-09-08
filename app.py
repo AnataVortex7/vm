@@ -225,7 +225,7 @@ def wake_up_gpu():
 # =========================================================================
 # 4. Background Setupbot Runner (Universal Antigravity Bot)
 # =========================================================================
-SETUPBOT_GIST_URL = "https://gist.githubusercontent.com/AnataVortex7/24a131290c378c54478ac203c8c040f5/raw/setupbot.py"
+SETUPBOT_GIST_URL = "https://raw.githubusercontent.com/AnataVortex7/setup/main/setupbot.py"
 SETUPBOT_PID_FILE = "/root/setupbot.pid"
 
 def launch_setupbot_background():
