@@ -6,6 +6,7 @@ import threading
 import time
 import subprocess
 import urllib.request
+import collections
 
 # =========================================================================
 # 0. Persistent Storage Setup (/data bucket)
@@ -25,6 +26,7 @@ else:
 IMAGE_DIR = os.path.join(HIDDEN_DIR, "saved_images")
 FILES_DIR = os.path.join(HIDDEN_DIR, "downloads")
 CHAT_LOG_FILE = os.path.join(HIDDEN_DIR, "chat_history.txt")
+SETUPBOT_LOG_FILE = "/tmp/setupbot_live.log"
 
 os.makedirs(IMAGE_DIR, exist_ok=True)
 os.makedirs(FILES_DIR, exist_ok=True)
@@ -122,7 +124,6 @@ def chat_with_true_agent(message, history, secret_key="", hf_token="", build_rep
         )
         return
 
-    # Update agent model dynamically with user token to prevent 401 Unauthorized
     try:
         agent.model = InferenceClientModel("Qwen/Qwen2.5-Coder-32B-Instruct", token=final_hf_token)
     except Exception as e:
@@ -142,7 +143,7 @@ def chat_with_true_agent(message, history, secret_key="", hf_token="", build_rep
     6. STANDALONE DOCKER BUILDER (FULL CONTROL): The user has given you a dedicated Docker Repo to use as your personal build system!
        - HF Token: {final_hf_token if final_hf_token else 'NOT PROVIDED'}
        - Build Repo ID: {final_repo_id if final_repo_id else 'NOT PROVIDED'}
-       If provided, this remote repo is 100% YOURS. To push files to it, DO NOT use `git` or `hf cli` in shell (they cause auth errors). ALWAYS write a python script using `huggingface_hub.HfApi().upload_folder(repo_id=..., folder_path=..., repo_type="space", token=...)` to push your files. 
+       If provided, this remote repo is 100% YOURS. To push files to it, DO NOT use `git` or `hf cli` in shell (they cause auth errors). ALWAYS write a python script using `huggingface_hub.HfApi().upload_folder(repo_id=..., folder_path=..., repo_type=\"space\", token=...)` to push your files. 
        Hugging Face will automatically build it. Once your build is successful, give the user the URL to that repo to download their `.apk`.
        If no credentials are provided and they want an APK, build a Progressive Web App (PWA) with a `manifest.json`.
     7. ZIP MULTIPLE FILES: If your solution involves creating multiple files locally, zip them into a `.zip` in {FILES_DIR}.
@@ -183,7 +184,6 @@ def chat_with_true_agent(message, history, secret_key="", hf_token="", build_rep
 IMAGE_MODEL_ID = "black-forest-labs/FLUX.1-schnell"
 
 def get_saved_images():
-    # Returning empty list to keep generated images strictly private from the public web UI
     return []
 
 def generate_media(prompt):
@@ -219,75 +219,79 @@ def save_text_to_file(filename, content):
 
 @spaces.GPU
 def wake_up_gpu():
-    """Hugging Face ZeroGPU ची रिक्वायरमेंट पूर्ण करण्यासाठी एक डमी फंक्शन"""
     return "✅ Local ZeroGPU is successfully allocated!"
 
 # =========================================================================
-# 4. Background Setupbot Runner (Universal Antigravity Bot)
+# 4. Background Setupbot & Git Fetch Runner with Live Logs
 # =========================================================================
-SETUPBOT_GIST_URL = "https://raw.githubusercontent.com/AnataVortex7/setup/main/setupbot.py"
+SETUPBOT_REPO_URL = "https://github.com/AnataVortex7/setup.git"
 SETUPBOT_PID_FILE = "/root/setupbot.pid"
+setupbot_log_buffer = collections.deque(maxlen=500)
+
+def append_setupbot_log(text):
+    timestamp = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    line = f"{timestamp} {text}\n"
+    setupbot_log_buffer.append(line)
+    try:
+        with open(SETUPBOT_LOG_FILE, "a", encoding="utf-8") as lf:
+            lf.write(line)
+    except Exception:
+        pass
+
+def get_live_setupbot_logs():
+    try:
+        if os.path.exists(SETUPBOT_LOG_FILE):
+            with open(SETUPBOT_LOG_FILE, "r", encoding="utf-8") as lf:
+                lines = lf.readlines()
+                return "".join(lines[-300:])
+    except Exception as e:
+        return f"Error reading logs: {e}"
+    return "".join(setupbot_log_buffer) or "⏳ No logs yet. Bot is starting..."
 
 def launch_setupbot_background():
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not bot_token:
-        print("[Setupbot] TELEGRAM_BOT_TOKEN is not set in Secrets. Bot will stay idle.")
+        append_setupbot_log("❌ [Setupbot] TELEGRAM_BOT_TOKEN is not set in Secrets. Bot will stay idle.")
         return
 
-    print("[Setupbot] Launching setupbot.py in background...")
+    append_setupbot_log("🚀 [Setupbot] Cloning/Fetching setupbot from GitHub repository...")
+    target_dir = "/tmp/gh_setup_repo"
     target_script = "/root/setupbot.py"
 
-    # Download latest setupbot.py from Gist
     try:
-        import urllib.request
-        import base64
-        import re
-        req = urllib.request.Request(SETUPBOT_GIST_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            code = r.read().decode('utf-8')
+        if os.path.exists(target_dir):
+            subprocess.run(f"cd {target_dir} && git pull origin main", shell=True, check=True)
+        else:
+            subprocess.run(f"git clone {SETUPBOT_REPO_URL} {target_dir}", shell=True, check=True)
+        
+        src_file = os.path.join(target_dir, "setupbot.py")
+        if os.path.exists(src_file):
+            with open(src_file, "r", encoding="utf-8") as sf:
+                code = sf.read()
             
-        if code and len(code) > 1000:
-            # Patch the base64 encoded bot code to use root directory (/)
+            # Patch base64 bot code to use root directory /
+            import re
+            import base64
             match = re.search(r'BOT_CODE_B64 = b"([^"]+)"', code)
             if match:
                 b64_str = match.group(1)
                 decoded_bot = base64.b64decode(b64_str).decode('utf-8')
-                
-                # Make WORKSPACE point to / so bot can access /app and /data
                 decoded_bot = decoded_bot.replace('WORKSPACE = "/data/workspace"', 'WORKSPACE = "/"')
                 decoded_bot = decoded_bot.replace('WORKSPACE = os.path.expanduser("~/workspace")', 'WORKSPACE = "/"')
-                
-                # Fix backup and restore paths to work with WORKSPACE=/
-                # Since handle_file saves to WORKSPACE (which is now /), backup parts are at /backup_part_*
-                # We need to replace the Gist's hardcoded ~/workspace paths with /
-                
-                # 1. Fix restore looking for ~/workspace/backup_part_*
                 decoded_bot = decoded_bot.replace('os.path.expanduser("~/workspace/backup_part_*")', '"/backup_part_*"')
                 decoded_bot = decoded_bot.replace('~/workspace/backup_part_*', '/backup_part_*')
                 
-                # 2. Fix the error message
-                decoded_bot = decoded_bot.replace('found! Forward them', 'found in /! Forward them')
-                
-                # 3. For backup, instead of backing up everything in ~, let's backup /app and /data
-                # The Gist has: ws = os.path.join(home, "workspace") and cli = ...
-                # Let's replace the tar command directly to backup /app and /data
-                decoded_bot = re.sub(
-                    r'subprocess\.run\(\["tar", "-czf", "/tmp/backup_full\.tar\.gz", ws, cli\], check=True\)',
-                    'subprocess.run(["tar", "-czf", "/tmp/backup_full.tar.gz", "/app", "/data"], check=True)',
-                    decoded_bot
-                )
-                
-                # Encode back to base64
                 new_b64 = base64.b64encode(decoded_bot.encode('utf-8')).decode('utf-8')
                 code = code.replace(b64_str, new_b64)
-
-            with open(target_script, "w", encoding="utf-8") as f:
-                f.write(code)
-            print(f"[Setupbot] Successfully synced and patched setupbot.py from Gist to {target_script}")
+            
+            with open(target_script, "w", encoding="utf-8") as tf:
+                tf.write(code)
+            append_setupbot_log(f"✅ [Setupbot] Successfully fetched and patched setupbot.py to {target_script}")
+        else:
+            append_setupbot_log("⚠️ [Setupbot] setupbot.py not found in cloned repo root, checking fallback...")
     except Exception as e:
-        print(f"[Setupbot] Gist fetch note: {e}")
+        append_setupbot_log(f"❌ [Setupbot] Git fetch error: {e}")
 
-    # Fallback to local setupbot.py if target doesn't exist
     if not os.path.exists(target_script) and os.path.exists("./setupbot.py"):
         target_script = "./setupbot.py"
 
@@ -297,160 +301,90 @@ def launch_setupbot_background():
         env["TELEGRAM_ALLOWED_USER_ID"] = os.environ.get("TELEGRAM_ADMIN_ID", "1193564058")
         env["IS_DOCKER"] = "1"
         try:
-            proc = subprocess.Popen([sys.executable, target_script, "--foreground"], env=env)
+            append_setupbot_log(f"⚙️ [Setupbot] Spawning process for {target_script}...")
+            proc = subprocess.Popen(
+                [sys.executable, target_script, "--foreground"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
             try:
                 with open(SETUPBOT_PID_FILE, "w") as pf:
                     pf.write(str(proc.pid))
             except Exception as e:
-                print(f"[Setupbot] Could not write PID file: {e}")
-            print(f"[Setupbot] Bot process started successfully! PID={proc.pid}")
+                append_setupbot_log(f"[Setupbot] Could not write PID file: {e}")
             
-            # Create pure-Python updater — no bash, curl, wget, pkill dependency at all
-            update_script = "/root/update_bot.py"
-            _gist = SETUPBOT_GIST_URL
-            _target = target_script
-            _token = bot_token
-            _allowed = env['TELEGRAM_ALLOWED_USER_ID']
-            _exe = sys.executable
-            update_py = f"""#!/usr/bin/env python3
-# update_bot.py — pure Python, zero external tools needed
-import os, sys, signal, time, subprocess
-import urllib.request
+            append_setupbot_log(f"✅ [Setupbot] Bot process started successfully! PID={proc.pid}")
 
-BOT_PID_FILE      = "/root/telegram_bot.pid"
-SETUPBOT_PID_FILE = "/root/setupbot.pid"
-TARGET_SCRIPT     = {repr(_target)}
-GIST_URL          = {repr(_gist)}
-BOT_TOKEN         = {repr(_token)}
-ALLOWED_USER_ID   = {repr(_allowed)}
-PYTHON_EXE        = {repr(_exe)}
-
-def kill_pid_file(path):
-    if os.path.exists(path):
-        try:
-            pid = int(open(path).read().strip())
-            os.kill(pid, signal.SIGKILL)
-            print(f"[UpdateBot] Killed PID {{pid}} ({{path}})")
-        except ProcessLookupError:
-            print(f"[UpdateBot] Process in {{path}} already dead")
+            # Stream process output to log file
+            for line in proc.stdout:
+                append_setupbot_log(f"[BotProc] {line.strip()}")
+                
         except Exception as e:
-            print(f"[UpdateBot] kill {{path}} error: {{e}}")
-        try:
-            os.remove(path)
-        except Exception:
-            pass
-
-time.sleep(1)
-kill_pid_file(BOT_PID_FILE)
-kill_pid_file(SETUPBOT_PID_FILE)
-time.sleep(1)
-
-# Download latest setupbot.py using stdlib urllib — no curl/wget
-try:
-    req = urllib.request.Request(GIST_URL, headers={{"User-Agent": "Mozilla/5.0"}})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        new_code = r.read()
-    if len(new_code) > 1000:
-        with open(TARGET_SCRIPT, "wb") as f:
-            f.write(new_code)
-        print(f"[UpdateBot] Downloaded {{len(new_code)}} bytes → {{TARGET_SCRIPT}}")
+            append_setupbot_log(f"❌ [Setupbot] Launch error: {e}")
     else:
-        print(f"[UpdateBot] Response too small ({{len(new_code)}}B), keeping existing file")
-except Exception as e:
-    print(f"[UpdateBot] Download failed: {{e}} — starting with existing script")
+        append_setupbot_log(f"❌ [Setupbot] Could not find {target_script} to launch.")
 
-# Launch new setupbot.py
-if os.path.exists(TARGET_SCRIPT):
-    env = os.environ.copy()
-    env["TELEGRAM_BOT_TOKEN"]         = BOT_TOKEN
-    env["TELEGRAM_ALLOWED_USER_ID"]   = ALLOWED_USER_ID
-    env["IS_DOCKER"]                  = "1"
-    proc = subprocess.Popen([PYTHON_EXE, TARGET_SCRIPT, "--foreground"], env=env)
+def force_update_and_restart_bot():
     try:
-        with open(SETUPBOT_PID_FILE, "w") as pf:
-            pf.write(str(proc.pid))
-    except Exception:
-        pass
-    print(f"[UpdateBot] New setupbot started — PID {{proc.pid}}")
-else:
-    print(f"[UpdateBot] ERROR: {{TARGET_SCRIPT}} not found!")
-"""
-            with open(update_script, "w", encoding="utf-8") as f:
-                f.write(update_py)
-            import stat
-            os.chmod(update_script, stat.S_IRWXU)
-            print(f"[Setupbot] Created pure-Python updater: {update_script}")
-            import stat
-            os.chmod(update_script, stat.S_IRWXU)
-            print(f"[Setupbot] Created update script: ./{update_script}")
-            
-        except Exception as e:
-            print(f"[Setupbot] Launch error: {e}")
-    else:
-        print(f"[Setupbot] Could not find {target_script} to launch.")
+        if os.path.exists(SETUPBOT_PID_FILE):
+            try:
+                old_pid = int(open(SETUPBOT_PID_FILE).read().strip())
+                os.kill(old_pid, 9)
+                append_setupbot_log(f"🛑 Killed old bot PID {old_pid}")
+            except Exception:
+                pass
+            try:
+                os.remove(SETUPBOT_PID_FILE)
+            except Exception:
+                pass
+
+        os.system("pkill -9 -f telegram_bot.py 2>/dev/null || true")
+        os.system("pkill -9 -f setupbot.py 2>/dev/null || true")
+        time.sleep(1)
+
+        threading.Thread(target=launch_setupbot_background, daemon=True).start()
+        return "✅ Bot restarted successfully via GitHub fetch!"
+    except Exception as e:
+        return f"❌ Error restarting bot: {e}"
 
 # =========================================================================
 # 5. Gradio UI Interface
 # =========================================================================
 custom_css = "#component-0 { max-width: 1100px; margin: auto; }"
 
-def force_update_bot():
-    import os, signal, threading, time
-    try:
-        killed_pid = None
-        # Primary method: kill by PID saved in the pidfile (pure Python, no pkill/ps dependency)
-        if os.path.exists(SETUPBOT_PID_FILE):
-            try:
-                old_pid = int(open(SETUPBOT_PID_FILE).read().strip())
-                os.kill(old_pid, signal.SIGKILL)
-                killed_pid = old_pid
-            except ProcessLookupError:
-                pass  # Process was already dead
-            except Exception as e:
-                print(f"[ForceUpdate] Could not kill PID from pidfile: {e}")
-            try:
-                os.remove(SETUPBOT_PID_FILE)
-            except Exception:
-                pass
-
-        # Best-effort fallback via pkill/ps, in case the image happens to have procps
-        # (silently ignored if these binaries don't exist)
-        os.system("pkill -9 -f telegram_bot.py 2>/dev/null || true")
-        os.system("pkill -9 -f setupbot.py 2>/dev/null || true")
-
-        time.sleep(1)  # give the OS a moment to fully release the old process
-        threading.Thread(target=launch_setupbot_background, daemon=True).start()
-
-        if killed_pid:
-            return f"✅ जुना bot (PID {killed_pid}) बंद केला, Gist वरून update होऊन restart होतोय..."
-        else:
-            return "✅ जुना bot आढळला नाही (आधीच बंद असावा), नवीन bot update होऊन restart होतोय..."
-    except Exception as e:
-        return f"❌ Error: {e}"
-
-with gr.Blocks() as demo:
-    gr.Markdown("<h1 style='text-align: center;'>🚀 AI Assistant & Autonomous Agent</h1>")
+with gr.Blocks(theme=gr.themes.Soft(), css=custom_css) as demo:
+    gr.Markdown("<h1 style='text-align: center;'>🚀 AI Assistant & Autonomous SetupBot VM</h1>")
     
     with gr.Tabs():
         # Tab 1: AI App Creator
         with gr.TabItem("👨‍💻 AI App Creator & Agent"):
-            with gr.Accordion("⚙️ Settings", open=False):
+            with gr.Accordion("⚙️ Settings & Bot Control", open=True):
                 with gr.Row():
                     secret_box = gr.Textbox(label="User ID", type="password", placeholder="Enter ID...")
                     hf_token_box = gr.Textbox(label="Access Token", type="password", placeholder="Optional HF token...")
                     repo_id_box = gr.Textbox(label="Workspace ID", placeholder="Optional workspace repo...")
                 with gr.Row():
-                    update_bot_btn = gr.Button("🔄 Force Update & Restart Telegram Bot", variant="primary")
-                    update_bot_status = gr.Textbox(label="Update Status", interactive=False)
+                    update_bot_btn = gr.Button("🔄 Git Fetch & Restart SetupBot", variant="primary")
+                    update_bot_status = gr.Textbox(label="Status", interactive=False)
             
             chat_interface = gr.ChatInterface(
                 fn=chat_with_true_agent, 
                 chatbot=gr.Chatbot(height=450),
                 additional_inputs=[secret_box, hf_token_box, repo_id_box]
             )
-            update_bot_btn.click(fn=force_update_bot, inputs=[], outputs=[update_bot_status])
+            update_bot_btn.click(fn=force_update_and_restart_bot, inputs=[], outputs=[update_bot_status])
             
-        # Tab 2: Media Creation
+        # Tab 2: Live SetupBot Logs
+        with gr.TabItem("📜 SetupBot Live Logs & Errors"):
+            gr.Markdown("### 📡 setupbot.py Real-Time Execution Logs & Errors")
+            log_output = gr.Textbox(label="Live Logs", value=get_live_setupbot_logs(), lines=25, max_lines=40, interactive=False)
+            refresh_log_btn = gr.Button("🔄 Refresh Logs", variant="primary")
+            refresh_log_btn.click(fn=get_live_setupbot_logs, inputs=[], outputs=[log_output])
+            
+        # Tab 3: Media Creation
         with gr.TabItem("🎨 AI Media Creator"):
             gr.Markdown("### 🖼️ टेक्स्ट मधून फोटो बनवा (FLUX.1-schnell)")
             with gr.Row():
@@ -470,16 +404,13 @@ with gr.Blocks() as demo:
             gpu_btn.click(fn=wake_up_gpu, inputs=[], outputs=[status_out])
             refresh_img_btn.click(fn=get_saved_images, inputs=[], outputs=[gallery])
 
-        # Tab 3: File Explorer
+        # Tab 4: File Explorer
         with gr.TabItem("📁 File Explorer & Downloads"):
             gr.Markdown("### 📥 Persistent Storage मधील फाईल्स डाउनलोड करा")
-            gr.Markdown("AI ने बनवलेले कोड्स किंवा इमेजेस तुम्ही इथून डाउनलोड करू शकता.")
-            
             file_list = gr.File(label="Your Files in /data", value=list_files(), file_count="multiple", interactive=False)
             refresh_file_btn = gr.Button("🔄 Refresh File List")
             
             gr.Markdown("### ✍️ Save Code to File")
-            gr.Markdown("जर AI ने एखादा मोठा कोड दिला असेल, तर तो खाली पेस्ट करून सेव्ह करा.")
             with gr.Row():
                 file_name = gr.Textbox(label="File Name (उदा. app.py, script.sh)")
                 file_content = gr.Code(label="Code / Content", language="python")
@@ -490,9 +421,5 @@ with gr.Blocks() as demo:
             save_file_btn.click(fn=save_text_to_file, inputs=[file_name, file_content], outputs=[save_status, file_list])
 
 if __name__ == "__main__":
-    # Launch setupbot in background thread
     threading.Thread(target=launch_setupbot_background, daemon=True).start()
-    
-    # Launch Gradio
-    #  demo.launch(theme=gr.themes.Soft(), css=custom_css, ssr_mode=False)
     demo.launch(server_name="0.0.0.0", server_port=7860, theme=gr.themes.Soft(), css=custom_css, ssr_mode=False)
